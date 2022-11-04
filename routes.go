@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -14,6 +15,7 @@ func routes(r *gin.Engine) {
 	r.POST("/user", routeCreateUser)
 	r.GET("/tasks", AuthorizationMiddleware(), routeGetTasks)
 	r.GET("/task/:taskId", AuthorizationMiddleware(), routeGetTask)
+	r.POST("/task", AuthorizationMiddleware(), routeCreateTask)
 
 }
 
@@ -32,26 +34,106 @@ func routeCreateUser(c *gin.Context) {
 		panic(err)
 	}
 
-	conn.Begin()
+	tx, err := conn.Begin()
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
 
-	_, err = conn.Exec(
-		"INSERT INTO `user` (`firstname`, `lastname`, `email`, `password`, `created_at`) VALUES (?, ?, ?, ?, ?);",
+	_, err = tx.Exec(
+		"INSERT INTO `user` (`firstname`, `lastname`, `email`, `password`, `timezone_id`, `activated_at`, `created_at`) "+
+			"VALUES (?, ?, ?, ?, (SELECT `id` FROM `timezone` WHERE `name` = ?), NULL, ?);",
 		firstname,
 		lastname,
 		email,
 		passwordHashed,
+		"Europe/Berlin",
 		time.Now().Format("2006-01-02 15:04:05"),
 	)
 	if err != nil {
 		panic(err)
 	}
 
+	err = tx.Commit()
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
 	c.Status(http.StatusOK)
 }
 
+func routeCreateTask(c *gin.Context) {
+	userId := c.MustGet("userId").(int)
+	title := c.PostForm("title")
+	description := c.PostForm("description")
+	deadlineString := c.PostForm("deadline")
+	color := c.PostForm("color")
+
+	if title == "" {
+		fmt.Println("routeCreateTask: title error")
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	_, err := time.Parse("2006-01-02 15:04:05", deadlineString)
+	if err != nil {
+		fmt.Println("routeCreateTask: deadline error")
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	if color != "info" && color != "danger" && color != "success" && color != "warning" && color != "dark" {
+		fmt.Println("routeCreateTask: color error")
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
+	conn, err := dbConnect()
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+
+	tx, err := conn.Begin()
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec(
+		"INSERT INTO `task` (`user_id`, `title`, `description`, `due_date`, `has_progress`, `task_color_id`, `created_at`) VALUES "+
+			"(?, ?, ?, ?, '0', (SELECT `id` FROM `task_color` WHERE `name` = ?), NOW());",
+		userId,
+		title,
+		description,
+		deadlineString,
+		color,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		fmt.Println(err)
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	c.Status(http.StatusOK)
+
+}
+
 type Task struct {
-	Id                int       `json:"id"`
-	Email             string    `json:"email"`
+	TaskId            int       `json:"taskId"`
+	UserId            int       `json:"userId"`
+	Timezone          string    `json:"timezone"`
 	Title             string    `json:"title"`
 	DueDateTime       time.Time `json:"dueDateTime"`
 	Description       string    `json:"description"`
@@ -88,7 +170,7 @@ func routeGetTasks(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	stmt, err := conn.Prepare("SELECT u.`id`, u.`email`, t.`title`, t.`due_date`, t.`description`, tc.`name` AS `color`" +
+	stmt, err := conn.Prepare("SELECT t.`id` AS `task_id`, u.`id` AS `user_id`, tz.`name` AS `timezone`, t.`title`, t.`due_date`, t.`description`, tc.`name` AS `color`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) AS `duration_in_seconds`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) DIV (86400) AS `days`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) MOD (86400) DIV (3600) AS `hours`" +
@@ -96,8 +178,14 @@ func routeGetTasks(c *gin.Context) {
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) MOD (86400) MOD (3600) MOD 60 AS `seconds`" +
 		" FROM `task` AS t" +
 		" LEFT JOIN `user` AS u ON u.id = t.user_id" +
+		" LEFT JOIN `timezone` AS tz ON tz.id = u.timezone_id" +
 		" LEFT JOIN `task_color` AS tc ON tc.id = t.task_color_id" +
-		" WHERE u.`id` = ?;")
+		" WHERE u.`id` = ?" +
+		" ORDER BY t.`due_date`;")
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
 
 	rows, err := stmt.Query(userId)
 	if err != nil {
@@ -110,7 +198,7 @@ func routeGetTasks(c *gin.Context) {
 
 		var t Task
 
-		if err := rows.Scan(&t.Id, &t.Email, &t.Title, &t.dueDate, &t.Description, &t.Color, &t.DurationInSeconds, &t.Days, &t.Hours, &t.Minutes, &t.Seconds); err != nil {
+		if err := rows.Scan(&t.TaskId, &t.UserId, &t.Timezone, &t.Title, &t.dueDate, &t.Description, &t.Color, &t.DurationInSeconds, &t.Days, &t.Hours, &t.Minutes, &t.Seconds); err != nil {
 			panic(err)
 		}
 
@@ -135,7 +223,7 @@ func routeGetTask(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	stmt, err := conn.Prepare("SELECT u.`id`, u.`email`, t.`title`, t.`due_date`, t.`description`, tc.`name` AS `color`" +
+	stmt, err := conn.Prepare("SELECT t.`id` AS `task_id`, u.`id` AS `user_id`, tz.`name` AS `timezone`, t.`title`, t.`due_date`, t.`description`, tc.`name` AS `color`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) AS `duration_in_seconds`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) DIV (86400) AS `days`" +
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) MOD (86400) DIV (3600) AS `hours`" +
@@ -143,12 +231,17 @@ func routeGetTask(c *gin.Context) {
 		", TIMESTAMPDIFF(SECOND, NOW(), t.`due_date`) MOD (86400) MOD (3600) MOD 60 AS `seconds`" +
 		" FROM `task` AS t" +
 		" LEFT JOIN `user` AS u ON u.id = t.user_id" +
+		" LEFT JOIN `timezone` AS tz ON tz.id = u.timezone_id" +
 		" LEFT JOIN `task_color` AS tc ON tc.id = t.task_color_id" +
 		" WHERE u.`id` = ? AND t.`id` = ?;")
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
 
 	var t Task
 
-	err = stmt.QueryRow(userId, taskId).Scan(&t.Id, &t.Email, &t.Title, &t.dueDate, &t.Description, &t.Color, &t.DurationInSeconds, &t.Days, &t.Hours, &t.Minutes, &t.Seconds)
+	err = stmt.QueryRow(userId, taskId).Scan(&t.TaskId, &t.UserId, &t.Timezone, &t.Title, &t.dueDate, &t.Description, &t.Color, &t.DurationInSeconds, &t.Days, &t.Hours, &t.Minutes, &t.Seconds)
 	if err != nil {
 		panic(err)
 	}
