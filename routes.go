@@ -16,6 +16,7 @@ func routes(r *gin.Engine) {
 	r.GET("/tasks", AuthorizationMiddleware(), routeGetTasks)
 	r.GET("/task/:taskId", AuthorizationMiddleware(), routeGetTask)
 	r.POST("/task", AuthorizationMiddleware(), routeCreateTask)
+	r.DELETE("/task", AuthorizationMiddleware(), routeDeleteTask)
 
 }
 
@@ -180,7 +181,7 @@ func routeGetTasks(c *gin.Context) {
 		" LEFT JOIN `user` AS u ON u.id = t.user_id" +
 		" LEFT JOIN `timezone` AS tz ON tz.id = u.timezone_id" +
 		" LEFT JOIN `task_color` AS tc ON tc.id = t.task_color_id" +
-		" WHERE u.`id` = ?" +
+		" WHERE u.`id` = ? AND t.`deleted_at` IS NULL" +
 		" ORDER BY t.`due_date`;")
 	if err != nil {
 		fmt.Println(err)
@@ -233,7 +234,7 @@ func routeGetTask(c *gin.Context) {
 		" LEFT JOIN `user` AS u ON u.id = t.user_id" +
 		" LEFT JOIN `timezone` AS tz ON tz.id = u.timezone_id" +
 		" LEFT JOIN `task_color` AS tc ON tc.id = t.task_color_id" +
-		" WHERE u.`id` = ? AND t.`id` = ?;")
+		" WHERE u.`id` = ? AND t.`id` = ? AND t.`deleted_at` IS NULL;")
 	if err != nil {
 		fmt.Println(err)
 		panic(err)
@@ -250,4 +251,34 @@ func routeGetTask(c *gin.Context) {
 
 	json, _ := json.Marshal(t)
 	c.Data(http.StatusOK, "application/json", json)
+}
+
+func routeDeleteTask(c *gin.Context) {
+
+	userId := c.MustGet("userId").(int)
+
+	var task Task
+	err := c.BindJSON(&task)
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
+
+	conn, err := dbConnect()
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+
+	result, err := conn.Exec("UPDATE `task` AS t"+
+		" SET t.`updated_at` = NOW(), t.`deleted_at` = NOW()"+
+		" WHERE t.`user_id` = ? AND t.`id` = ?;", userId, task.TaskId)
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
+
+	fmt.Println(result.RowsAffected())
+
+	c.Status(http.StatusOK)
 }
