@@ -1,5 +1,7 @@
 FROM golang:1.19.3-bullseye
 
+EXPOSE 8080
+
 WORKDIR /usr/src
 
 COPY . .
