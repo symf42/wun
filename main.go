@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	hostname string = "localhost"
+	hostname string = "0.0.0.0"
 	port     int    = 8080
 )
 
